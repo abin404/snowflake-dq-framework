@@ -74,43 +74,41 @@ def referential_check(session, df, col, ref_table, ref_col):
     return {"failed": failed, "percent": (failed / total) * 100}
 
 
+def run_dq_from_config(session, dq_config):
+    all_results = []
 
-def run_dq_checks(session, table_name, dq_rules):
-    df = session.table(table_name)
-    results = []
+    for table_entry in dq_config["tables"]:
+        table_name = table_entry["name"]
+        df = session.table(table_name)
+        print(f"Running DQ for table: {table_name}")
 
-    for rule in dq_rules:
-        dq_type = rule["dq_type"]
-        col = rule.get("column")
-        params = rule.get("params", {})
+        for col_entry in table_entry["columns"]:
+            col = col_entry["name"]
+            for rule in col_entry["dq_rules"]:
+                dq_type = rule["dq_type"]
+                params = rule.get("params", {})
 
-        dq_func = DQ_FUNCTIONS.get(dq_type)
-        if not dq_func:
-            print(f"⚠️ Unknown rule: {dq_type}")
-            continue
+                dq_func = DQ_FUNCTIONS.get(dq_type)
+                if dq_func is None:
+                    print(f"⚠️ Unknown DQ check: {dq_type}")
+                    continue
 
-        try:
-            if dq_type == "referential_check":
-                res = dq_func(session, df, **params)
-            elif dq_type == "cross_field_check":
-                res = dq_func(df, params["col1"], params["operator"], params["col2"])
-            else:
-                res = dq_func(df, col, **params)
+                try:
+                    result = dq_func(df, col, **params)
+                    result.update({
+                        "table": table_name,
+                        "column": col,
+                        "dq_type": dq_type,
+                        "status": "PASS" if result["percent"] < 1 else "FAIL"
+                    })
+                    all_results.append(result)
+                except Exception as e:
+                    all_results.append({
+                        "table": table_name,
+                        "column": col,
+                        "dq_type": dq_type,
+                        "status": "ERROR",
+                        "error": str(e)
+                    })
 
-            res.update({
-                "table": table_name,
-                "dq_type": dq_type,
-                "column": col,
-                "status": "PASS" if res["percent"] == 0 else "FAIL"
-            })
-            results.append(res)
-        except Exception as e:
-            results.append({
-                "table": table_name,
-                "dq_type": dq_type,
-                "column": col,
-                "status": "ERROR",
-                "error": str(e)
-            })
-
-    return session.create_dataframe(results)
+    return session.create_dataframe(all_results)
