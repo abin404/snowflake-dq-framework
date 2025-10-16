@@ -74,6 +74,65 @@ def referential_check(session, df, col, ref_table, ref_col):
     return {"failed": failed, "percent": (failed / total) * 100}
 
 
+@dq_check("value_set_check")
+def value_set_check(df, col, allowed_values):
+    total = df.count()
+    failed = df.filter(~F.col(col).isin(allowed_values)).count()
+    return {"failed": failed, "percent": (failed / total) * 100}
+
+
+@dq_check("data_type_check")
+def data_type_check(df, col, expected_type):
+    # crude type check using cast
+    total = df.count()
+    failed = df.filter(F.col(col).cast(expected_type).is_null() & F.col(col).is_not_null()).count()
+    return {"failed": failed, "percent": (failed / total) * 100}
+
+
+@dq_check("length_check")
+def length_check(df, col, min_len=None, max_len=None):
+    total = df.count()
+    cond = None
+    if min_len is not None:
+        cond = F.length(F.col(col)) < min_len
+    if max_len is not None:
+        cond = cond | (F.length(F.col(col)) > max_len) if cond is not None else F.length(F.col(col)) > max_len
+    failed = df.filter(cond).count() if cond is not None else 0
+    return {"failed": failed, "percent": (failed / total) * 100}
+
+
+@dq_check("date_validity_check")
+def date_validity_check(df, col, date_format="YYYY-MM-DD"):
+    total = df.count()
+    failed = df.filter(F.to_date(F.col(col), date_format).is_null()).count()
+    return {"failed": failed, "percent": (failed / total) * 100}
+
+
+@dq_check("duplicate_row_check")
+def duplicate_row_check(df):
+    total = df.count()
+    failed = df.group_by(df.columns).count().filter(F.col("count") > 1).count()
+    return {"failed": failed, "percent": (failed / total) * 100}
+
+
+@dq_check("custom_expression_check")
+def custom_expression_check(df, expression):
+    """Run custom Snowpark SQL-like filter and count failed rows."""
+    total = df.count()
+    failed = df.filter(~F.expr(expression)).count()
+    return {"failed": failed, "percent": (failed / total) * 100}
+
+
+@dq_check("conditional_check")
+def conditional_check(df, condition, col, expected_value):
+    """Check if a column meets expected value when condition is true."""
+    total = df.filter(F.expr(condition)).count()
+    failed = df.filter(F.expr(condition) & (F.col(col) != F.lit(expected_value))).count()
+    return {"failed": failed, "percent": (failed / total) * 100 if total else 0}
+
+
+# ---------------- DQ Runner ----------------
+
 def run_dq_from_config(session, dq_config):
     all_results = []
 
@@ -87,6 +146,7 @@ def run_dq_from_config(session, dq_config):
             for rule in col_entry["dq_rules"]:
                 dq_type = rule["dq_type"]
                 params = rule.get("params", {})
+                threshold = rule.get("threshold", 1.0)
 
                 dq_func = DQ_FUNCTIONS.get(dq_type)
                 if dq_func is None:
@@ -94,12 +154,23 @@ def run_dq_from_config(session, dq_config):
                     continue
 
                 try:
-                    result = dq_func(df, col, **params)
+                    # Allow both (df, col, **params) and (session, df, col, **params)
+                    if dq_type == "referential_check":
+                        result = dq_func(session, df, col, **params)
+                    elif dq_type == "duplicate_row_check":
+                        result = dq_func(df)
+                    elif dq_type == "custom_expression_check":
+                        result = dq_func(df, **params)
+                    elif dq_type == "conditional_check":
+                        result = dq_func(df, **params)
+                    else:
+                        result = dq_func(df, col, **params)
+
                     result.update({
                         "table": table_name,
                         "column": col,
                         "dq_type": dq_type,
-                        "status": "PASS" if result["percent"] < 1 else "FAIL"
+                        "status": "PASS" if result["percent"] <= threshold else "FAIL"
                     })
                     all_results.append(result)
                 except Exception as e:
