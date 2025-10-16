@@ -83,9 +83,24 @@ def value_set_check(df, col, allowed_values):
 
 @dq_check("data_type_check")
 def data_type_check(df, col, expected_type):
-    # crude type check using cast
     total = df.count()
-    failed = df.filter(F.col(col).cast(expected_type).is_null() & F.col(col).is_not_null()).count()
+    expected_type = expected_type.upper()
+
+    if expected_type in ["NUMBER", "INT", "INTEGER", "FLOAT", "DECIMAL"]:
+        # Fail rows that contain non-numeric characters
+        failed = df.filter(~F.col(col).rlike(r"^-?\d+(\.\d+)?$")).count()
+
+    elif expected_type in ["DATE", "TIMESTAMP"]:
+        # Detect invalid dates or timestamps
+        failed = df.filter(F.expr(f"TRY_TO_DATE({col}) IS NULL AND {col} IS NOT NULL")).count()
+
+    elif expected_type in ["STRING", "VARCHAR", "TEXT"]:
+        # Only fail if it's purely numeric — allow date-like strings
+        failed = df.filter(F.col(col).rlike(r"^\d+$")).count()
+
+    else:
+        raise ValueError(f"Unsupported expected_type: {expected_type}")
+
     return {"failed": failed, "percent": (failed / total) * 100}
 
 
