@@ -193,3 +193,53 @@ spark = inputs[0].sql_ctx.sparkSession
 dq_df = write_dq_results(spark, dq_results, parameters["dq_audit_path"])
 
 output = dq_df  # optional, can be used in next StreamSets stage
+
+def check_reconciliation(df_source, df_target, value_columns, edi_business_day):
+    """
+    Efficiently checks reconciliation on numeric columns.
+    Aggregates counts and sums in a single pass per frame.
+    Returns structured results.
+    """
+    if not value_columns:
+        return []
+    # Normalize column inputs
+    if isinstance(value_columns, str):
+        value_columns = [value_columns]
+    for col_name in value_columns:
+        if not isinstance(col_name, str):
+            raise TypeError(f"value_columns must contain string column names, got {type(col_name)}")
+
+    # Helper to build aggregation expressions
+    def agg_exprs(cols):
+        return [
+            F.count(F.col(c)).alias(f"{c}_non_null_count") for c in cols
+        ] + [
+            F.sum(F.col(c)).alias(f"{c}_sum") for c in cols
+        ]
+
+    src_metrics = df_source.agg(*agg_exprs(value_columns)).collect()[0].asDict()
+    tgt_metrics = df_target.agg(*agg_exprs(value_columns)).collect()[0].asDict()
+
+    dq_results = []
+    for c in value_columns:
+        src_not_null = int(src_metrics.get(f"{c}_non_null_count") or 0)
+        tgt_not_null = int(tgt_metrics.get(f"{c}_non_null_count") or 0)
+        src_sum = float(src_metrics.get(f"{c}_sum") or 0.0)
+        tgt_sum = float(tgt_metrics.get(f"{c}_sum") or 0.0)
+
+        count_status = DQStatus.PASS_ if src_not_null == tgt_not_null else DQStatus.FAIL
+        sum_status = DQStatus.PASS_ if src_sum == tgt_sum else DQStatus.FAIL
+
+        dq_results.extend([
+            create_result(
+                DQDimension.RECONCILIATION, c, count_status,
+                abs(src_not_null - tgt_not_null), edi_business_day,
+                f"Non-null count check — Source: {src_not_null}, Target: {tgt_not_null}",
+            ),
+            create_result(
+                DQDimension.RECONCILIATION, c, sum_status,
+                abs(src_sum - tgt_sum), edi_business_day,
+                f"Sum check — Source: {src_sum}, Target: {tgt_sum}",
+            )
+        ])
+    return dq_results
